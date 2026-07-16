@@ -186,11 +186,12 @@ def send_mention(username: str) -> bool:
         log(f"DRY-RUN would post mention: {text}")
         return True
     resp = api_post("/tweets", {"text": text})
+    log(f"POST /tweets response: {resp.status_code} {resp.text}")
     if resp.status_code in (200, 201):
         tweet_id = resp.json().get("data", {}).get("id", "?")
         log(f"MENTION posted (tweet {tweet_id}): {text}")
         return True
-    log(f"ERROR posting mention for @{username}: {resp.status_code} {resp.text}")
+    log(f"ERROR posting mention for @{username}: {resp.status_code}")
     return False
 
 
@@ -199,13 +200,14 @@ def send_dm(user_id: str, username: str) -> str:
         log(f"DRY-RUN would DM @{username} (id {user_id}): hey")
         return "DM_DRY_RUN"
     resp = api_post(f"/dm_conversations/with/{user_id}/messages", {"text": "hey"})
+    log(f"POST /dm_conversations response: {resp.status_code} {resp.text}")
     if resp.status_code in (200, 201):
         log(f"DM sent to @{username}")
         return "DM_SENT"
     if resp.status_code in (403, 400):
-        log(f"UNREACHABLE @{username}: {resp.status_code} {resp.text}")
+        log(f"UNREACHABLE @{username}: {resp.status_code}")
         return "UNREACHABLE"
-    log(f"ERROR sending DM to @{username}: {resp.status_code} {resp.text}")
+    log(f"ERROR sending DM to @{username}: {resp.status_code}")
     return f"DM_ERROR_{resp.status_code}"
 
 
@@ -215,22 +217,27 @@ def process_repost(tweet: dict) -> None:
     """Handle a single repost event from the webhook payload."""
     event_id = tweet.get("id_str", "")
     if event_id in _seen_events:
-        log(f"DUPLICATE event {event_id}, skipping")
+        log(f"DEDUP event_id={event_id} already seen in-memory, skipping")
         return
     _seen_events.add(event_id)
 
     user = tweet.get("user", {})
     uid = user.get("id_str", "")
     username = user.get("screen_name", "")
+    log(f"PROCESS @{username} (uid={uid}, event_id={event_id})")
 
     state = load_state()
     if uid in state:
-        log(f"ALREADY PROCESSED @{username} (id {uid})")
+        log(f"ALREADY PROCESSED @{username} (uid={uid}) "
+            f"outcome={state[uid].get('outcome')}")
         return
 
     # ── Follow check ──
     follower_ids = get_follower_ids()
-    if uid not in follower_ids:
+    is_follower = uid in follower_ids
+    log(f"FOLLOW CHECK @{username}: uid={uid} in followers={is_follower} "
+        f"(follower count={len(follower_ids)})")
+    if not is_follower:
         log(f"SKIP @{username}: doesn't follow @{MY_USERNAME}")
         state[uid] = {"outcome": "NO_FOLLOW", "username": username}
         save_state(state)
@@ -246,8 +253,10 @@ def process_repost(tweet: dict) -> None:
     created = datetime.strptime(created_at_str, "%a %b %d %H:%M:%S %z %Y")
     now = datetime.now(timezone.utc)
     age_days = (now - created).days
+    log(f"AGE CHECK @{username}: created_at={created_at_str} "
+        f"age_days={age_days} min={MIN_ACCOUNT_AGE_DAYS}")
     if age_days < MIN_ACCOUNT_AGE_DAYS:
-        log(f"SKIP @{username}: account {age_days} days old "
+        log(f"SKIP @{username}: account {age_days}d old "
             f"(need >= {MIN_ACCOUNT_AGE_DAYS})")
         state[uid] = {"outcome": "TOO_NEW", "username": username,
                       "age_days": age_days}
@@ -255,54 +264,88 @@ def process_repost(tweet: dict) -> None:
         return
 
     # ── Mention + DM ──
-    log(f"QUALIFIED @{username} (follows, account {age_days}d old)")
+    log(f"QUALIFIED @{username} (follows=true, age={age_days}d)")
+
+    log(f"SENDING mention for @{username} ...")
     mention_ok = send_mention(username)
+    log(f"MENTION result for @{username}: ok={mention_ok}")
     if not mention_ok:
         state[uid] = {"outcome": "MENTION_FAILED", "username": username}
         save_state(state)
         return
 
+    log(f"SENDING DM to @{username} (uid={uid}) ...")
     dm_outcome = send_dm(uid, username)
+    log(f"DM result for @{username}: outcome={dm_outcome}")
     state[uid] = {"outcome": dm_outcome, "username": username}
     save_state(state)
 
 
 def handle_events(payload: dict) -> None:
     """Background task — process the full webhook payload."""
-    # Only act on events for our user.
+    event_types = [k for k in payload if k != "for_user_id"]
     for_user = payload.get("for_user_id", "")
+    log(f"HANDLE for_user_id={for_user} event_types={event_types}")
+
     if for_user and for_user != MY_USER_ID:
+        log(f"IGNORE for_user_id={for_user} != MY_USER_ID={MY_USER_ID}")
         return
 
     # ── Repost events ──
-    for tweet in payload.get("tweet_create_events", []):
+    tweets = payload.get("tweet_create_events", [])
+    if tweets:
+        log(f"tweet_create_events: {len(tweets)} event(s)")
+    for tweet in tweets:
+        tid = tweet.get("id_str", "?")
+        tweeter = tweet.get("user", {}).get("screen_name", "?")
         rt = tweet.get("retweeted_status")
         if not rt:
+            log(f"  tweet {tid} by @{tweeter}: not a retweet, ignoring")
             continue
-        if rt.get("id_str") != POST_ID:
+        rt_id = rt.get("id_str", "?")
+        log(f"  tweet {tid} by @{tweeter}: retweet of {rt_id} "
+            f"(watching for {POST_ID})")
+        if rt_id != POST_ID:
+            log(f"  SKIP: rt_id={rt_id} != POST_ID={POST_ID}")
             continue
-        log(f"REPOST detected: @{tweet['user']['screen_name']} "
-            f"reposted post {POST_ID}")
+        log(f"  MATCH: repost of watched post by @{tweeter}")
         process_repost(tweet)
 
     # ── DM events (log only) ──
-    for event in payload.get("direct_message_events", []):
+    dms = payload.get("direct_message_events", [])
+    if dms:
+        log(f"direct_message_events: {len(dms)} event(s)")
+    for event in dms:
         event_id = event.get("id", "")
         if event_id in _seen_events:
+            log(f"  DM event {event_id}: duplicate, skipping")
             continue
         _seen_events.add(event_id)
 
         msg = event.get("message_create", {})
         sender_id = msg.get("sender_id", "")
         if sender_id == MY_USER_ID:
-            continue  # ignore our own outgoing messages
+            log(f"  DM event {event_id}: from self, ignoring")
+            continue
         text = msg.get("message_data", {}).get("text", "")
-        log(f"DM received — sender_id={sender_id} text={text!r}")
+        log(f"  DM received — event_id={event_id} sender_id={sender_id} "
+            f"text={text!r}")
+
+    # Log any other event types we received but don't handle.
+    for key in event_types:
+        if key not in ("tweet_create_events", "direct_message_events"):
+            count = len(payload[key]) if isinstance(payload[key], list) else 1
+            log(f"UNHANDLED event type: {key} ({count} item(s))")
 
 
 # ── FastAPI routes ────────────────────────────────────────────────────────────
 
 app = FastAPI()
+
+
+@app.get("/")
+async def health():
+    return {"status": "ok"}
 
 
 @app.get("/webhook")
@@ -321,7 +364,9 @@ async def crc_challenge(crc_token: str = Query(...)):
 @app.post("/webhook")
 async def webhook_event(request: Request, bg: BackgroundTasks):
     """Receive webhook events — return 200 immediately, process in background."""
-    payload = await request.json()
+    raw = await request.body()
+    log(f"WEBHOOK RAW: {raw.decode()}")
+    payload = json.loads(raw)
     bg.add_task(handle_events, payload)
     return JSONResponse(status_code=200, content={})
 

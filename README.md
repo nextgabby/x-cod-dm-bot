@@ -128,6 +128,45 @@ DM received -- sender_id=999... text='thanks!'
 
 On Render's free tier the filesystem is **ephemeral** -- state resets on each deploy or restart. The server logs a warning about this on startup. For a test this is fine; if you need persistence, set `REDIS_URL` to a Redis instance (e.g. Render Redis or Upstash) and `pip install redis` (add `redis` to `requirements.txt`).
 
+## OAuth 2.0 login helper
+
+`scripts/oauth2_login.py` performs the OAuth 2.0 Authorization Code + PKCE flow to obtain user-level access and refresh tokens. The bot itself uses OAuth 1.0a, but this helper is useful if you need OAuth 2.0 tokens for other v2 endpoints.
+
+### Setup
+
+1. In the X Developer Portal, under **User authentication settings**, enable **OAuth 2.0**.
+2. Set the **Redirect URI** to `http://127.0.0.1:8000/callback`.
+3. Copy the **Client ID** into your `.env`:
+
+```
+CLIENT_ID=your-oauth2-client-id
+```
+
+If your app is a **confidential** client, also set `CLIENT_SECRET`.
+
+### Login
+
+```bash
+python3 scripts/oauth2_login.py
+```
+
+This will:
+1. Generate a PKCE code verifier/challenge
+2. Open the X authorization page in your browser
+3. Run a local server on `127.0.0.1:8000` to catch the callback
+4. Exchange the authorization code for tokens
+5. Save `OAUTH2_ACCESS_TOKEN` and `OAUTH2_REFRESH_TOKEN` to `.env`
+
+### Refresh
+
+Access tokens expire after 2 hours. To refresh:
+
+```bash
+python3 scripts/oauth2_login.py refresh
+```
+
+This reads `OAUTH2_REFRESH_TOKEN` from `.env`, exchanges it for a new access token, and writes both the new access and rotated refresh token back to `.env`.
+
 ## Local development
 
 ```bash
