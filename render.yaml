@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: x-cod-dm-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn drop_test:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: POST_ID
+        sync: false
+      - key: MY_USER_ID
+        sync: false
+      - key: MY_USERNAME
+        sync: false
+      - key: CONSUMER_KEY
+        sync: false
+      - key: CONSUMER_SECRET
+        sync: false
+      - key: ACCESS_TOKEN
+        sync: false
+      - key: ACCESS_TOKEN_SECRET
+        sync: false
+      - key: DRY_RUN
+        value: "false"
+      - key: MIN_ACCOUNT_AGE_DAYS
+        value: "30"
