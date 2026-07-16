@@ -343,7 +343,7 @@ def handle_events(payload: dict) -> None:
 app = FastAPI()
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok"}
 
